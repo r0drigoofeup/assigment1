@@ -1,0 +1,30 @@
+# Python: bytecode e caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Ambientes virtuais
+.venv/
+venv/
+env/
+
+# Ficheiros locais com variáveis de ambiente
+.env
+.env.*
+!.env.example
+
+# Extração temporária dos PDFs
+/.reading/
+
+# Ficheiros temporários do sistema e dos editores
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+*~
