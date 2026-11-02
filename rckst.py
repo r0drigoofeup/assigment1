@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import argparse
 import random
+from time import perf_counter
 
 @dataclass(frozen=True)
 class Edge:
@@ -442,6 +443,148 @@ def pilot_multistart(instance: Instance, gamma: int | None = None, lvalue: float
             best_solution = list(solution)
 
     return best_solution
+
+##Cria uma neighbhoroud retirar uma aresta e adicionar outra
+def edge_exchange_neighbors(instance: Instance, selected_edges, current_cost,current_slack,deadline):
+    ##uniformizar os extremos das arestas
+    tree_edges={edge_key(u,v) for u,v in selected_edges}
+    selected_nodes = set()
+    for u, v in tree_edges:
+        selected_nodes.add(u)
+        selected_nodes.add(v)
+
+    ### save the neigh of each node on the current tree
+    adjacency = {v: [] for v in selected_nodes} ## para cada no criar uma lista vazia e depois percorrer as edges e por no dicionario
+    for u,v in sorted(tree_edges):
+        adjacency[u].append(v)
+        adjacency[v].append(u)
+
+    for removed_key in sorted(tree_edges):
+        if perf_counter()>= deadline:
+            return
+
+        ##ver os nos de cada lado considerandoq q removemos uma aresta [removed_key]
+        removed_edge = instance.edges[removed_key]
+        root = removed_key[0]
+        component = {root}
+        stack = [root]
+
+        ## basicamente descobrir um dos lados da arvore ex: 1-2-3-4 se retirar a lig 2-3 fico com dois lados 1,2 e 3,4
+        while stack:
+            if perf_counter()>=deadline:
+                return
+            node=stack.pop() ##cada no que vamos explorando tiramos da stack
+
+
+            for neighbor in adjacency[node]:
+                if edge_key(node,neighbor) == removed_key: ##ignorar a ligacao que tiramos
+                    continue
+                if neighbor not in component:
+                    component.add(neighbor)
+                    stack.append(neighbor)
+
+        for added_key, added_edge in instance.edges.items(): ##dicionario vai buscar a chave+class em si
+            u,v = added_key
+            ###não pode ser a aresta ja escolhida e nao pode ser a proprira retirada (voltar a po la da a mesma solução) e os dois extremos tem de pertencer aos nos escolhidos e se estão do mesmo lado
+            if added_key in tree_edges: #nao adicinar uma aresta que ja pertence/a retirada
+                continue
+            if u not in selected_nodes or v not in selected_nodes: ##nao mudamos os nos escolhidos
+                continue
+            if (u in component) == (v in component): ## um extremo ta de uma lado da arvore e o outro esta do outro para a arvore ligar
+                continue
+
+            ##calcular novo custo
+            new_cost=current_cost-removed_edge.cost+added_edge.cost
+            ##calcular nova folga (como os nos sao os mesmo, os recursos disponiveis sao iguais logo e so atualizar o consumo das arestas)
+            new_slack= tuple(current_slack[l]+removed_edge.resources[l]-added_edge.resources[l] for l in range(instance.m))
+
+            if any(value<0 for value in new_slack):
+                continue  ##folga tem de ser postiva sempre para sol ser valida
+
+            yield([removed_key],[added_key],new_cost,new_slack) ##nao entendi bem o yield perguntar ao gomes 
+
+
+def local_search(instance:Instance, initial_solution, neighborhood=edge_exchange_neighbors, step_function:str ="first", time_limit:float=30):
+
+    begin = perf_counter()
+    deadline = begin + time_limit
+
+    if step_function not in ("first", "best"):
+        raise ValueError("Strategy deve ser 'first' ou 'best'.")
+    
+    ##confirmar que arvore inicial valida so porque sim 
+    validation=validate_solution(instance, initial_solution)
+    if not validation.valid:
+        raise ValueError("Inital solution invalid" + "; ".join(validation.errors))
+
+    current_edges=sorted(edge_key(u,v) for u,v in initial_solution) ##copiar para nao alterar a sol input
+
+    current_cost=validation.cost
+    current_slack=validation.slack
+    initial_cost=current_cost
+    iterations=0  ##benchmarking
+    evaluated_neighbors=0   ##benchmarking
+    stop_reason ="time limit"
+
+    while perf_counter() < deadline:
+        best_move = None
+        best_move_cost=current_cost
+
+        for move in neighborhood(instance,current_edges,current_cost,current_slack,deadline):
+            if perf_counter() >= deadline:
+                break
+
+            removed_edges,added_edges,new_cost,new_slack =move
+            evaluated_neighbors+=1
+            if new_cost<best_move_cost:
+                best_move=move
+                best_move_cost=new_cost
+
+                if step_function=="first":
+                    break  ##first improvement se nao for ou seja for best continua
+
+
+        timed_out=perf_counter()>=deadline
+        ## se o tempo acababar e nao ecnontar melhor solução é local opt
+        if best_move is None:
+            if timed_out:
+                stop_reason ="time limit"
+            else:
+                stop_reason ="local optimum"
+            break
+        
+        ##aplicar a melhoria escolhida
+        removed_edges, added_edges, new_cost, new_slack=best_move
+        updates_edges=set(current_edges)
+        for u,v in removed_edges:
+            updates_edges.remove(edge_key(u,v))
+        for u,v in added_edges:
+            updates_edges.add(edge_key(u,v))
+
+        current_edges=sorted(updates_edges)
+        current_cost=new_cost
+        current_slack=new_slack
+        iterations+=1
+
+        if timed_out:
+            stop_reason="time limit"
+            break
+
+    ##verificar que solução é valida
+    final_validation=validate_solution(instance,current_edges)
+    if not final_validation.valid:
+        raise RuntimeError("Invalid solution from local search")
+
+    if (final_validation.cost != current_cost or final_validation.slack != current_slack):
+        raise RuntimeError("Error on updating resources/consumption")
+
+    information = {"strategy": step_function, "initial_cost": initial_cost, "final_cost": current_cost, "iterations": iterations, "evaluated_valid_neighbors": evaluated_neighbors, "stop_reason": stop_reason, "time": perf_counter() - begin}
+
+
+    return current_edges, information
+
+
+
 
 ##o que é esta porra
 def main() -> None:
