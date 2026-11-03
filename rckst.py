@@ -415,7 +415,7 @@ def construct_pilot(instance: Instance, start: int, gamma: int = 3, lvalue: floa
         if best_candidate is None:
             break
 
-        ##adicionar o primeiro (pilot method)
+        ##adicionar o primeiro (pila method)
         new_node, edge = best_candidate
         selected_nodes.add(new_node)
         selected_edges.append(edge_key(edge.u,edge.v))
@@ -444,7 +444,7 @@ def pilot_multistart(instance: Instance, gamma: int | None = None, lvalue: float
 
     return best_solution
 
-##Cria uma neighbhoroud retirar uma aresta e adicionar outra
+##Cria uma neighbhoroud retirar uma aresta e adicionar outra mas mantendo os mesmos nós
 def edge_exchange_neighbors(instance: Instance, selected_edges, current_cost,current_slack,deadline):
     ##uniformizar os extremos das arestas
     tree_edges={edge_key(u,v) for u,v in selected_edges}
@@ -501,7 +501,7 @@ def edge_exchange_neighbors(instance: Instance, selected_edges, current_cost,cur
             if any(value<0 for value in new_slack):
                 continue  ##folga tem de ser postiva sempre para sol ser valida
 
-            yield([removed_key],[added_key],new_cost,new_slack) ##nao entendi bem o yield perguntar ao gomes 
+            yield([removed_key],[added_key],new_cost,new_slack)
 
 
 def local_search(instance:Instance, initial_solution, neighborhood=edge_exchange_neighbors, step_function:str ="first", time_limit:float=30):
@@ -584,7 +584,121 @@ def local_search(instance:Instance, initial_solution, neighborhood=edge_exchange
     return current_edges, information
 
 
+#####retirar uma folha da arvore (folha é tipo um extrema so tem uma ligaçao) desta vez vamos trocar os nos (no caso adicionar um nó que nao os iniciais), logo os recursos dos nos vao mudar desta vez
+def leaf_exchange_neighbors(instance, selected_edges, current_cost, current_slack, deadline):
+    ##igual ao outro, ir buscar os nos e arestas da arvore
+    tree_edges={edge_key(u,v) for u,v in selected_edges}
+    selected_nodes = set()
+    for u, v in tree_edges:
+        selected_nodes.add(u)
+        selected_nodes.add(v)
+    
+    ### save the neigh of each node on the current tree
+    adjacency = {v: [] for v in selected_nodes} ## para cada nó criar uma lista vazia e depois percorrer as edges e por no dicionario
+    for u,v in sorted(tree_edges):
+        adjacency[u].append(v)
+        adjacency[v].append(u)
 
+
+    for leaf in sorted(selected_nodes):
+        if perf_counter() >= deadline:
+            return
+
+        if len(adjacency[leaf]) !=1:
+            continue ##nao é uma folha se a lista do dic tiver mais que 1
+
+        parent =adjacency [leaf][0]  ##neigb da folha
+        removed_key=edge_key(leaf,parent)
+        removed_edge=instance.edges[removed_key]
+
+        remaining_nodes= selected_nodes-{leaf}    #nos que ficam
+
+        ##procurar uma aresta que ligue um novo no exterior à árvore
+        for added_key, added_edge in instance.edges.items():
+            if perf_counter() >= deadline:
+                return
+            
+            u,v=added_key
+
+            if u in remaining_nodes and v not in selected_nodes:
+                new_node=v
+            elif v in remaining_nodes and u not in selected_nodes:
+                new_node=u
+            else:
+                continue
+
+            ##retirar custos e consumos e arranjar recursos
+            new_cost=current_cost-removed_edge.cost+added_edge.cost
+            new_slack=tuple(current_slack[l]-instance.node_resources[leaf][l]+instance.node_resources[new_node][l]+removed_edge.resources[l]-added_edge.resources[l] for l in range(instance.m))
+
+            if any(value<0 for value in new_slack):
+                continue  ##folga tem de ser postiva sempre para sol ser valida
+
+            yield([removed_key],[added_key],new_cost,new_slack) ##ja entendi o yield
+
+
+##aqui tiramos um no do meio (tem 2 ligações) e juntamos as duas ligaçoes abertas e depois acrecentamos outro nó (leaf que so tem uma ligação)
+def internal_to_leaf_neighbors(instance,selected_edges,current_cost,current_slack,deadline):
+    ##igual ao outro, ir buscar os nos e arestas da arvore
+    tree_edges={edge_key(u,v) for u,v in selected_edges}
+    selected_nodes = set()
+    for u, v in tree_edges:
+        selected_nodes.add(u)
+        selected_nodes.add(v)
+        
+    ### save the neigh of each node on the current tree
+    adjacency = {v: [] for v in selected_nodes} ## para cada nó criar uma lista vazia e depois percorrer as edges e por no dicionario
+    for u,v in sorted(tree_edges):
+        adjacency[u].append(v)
+        adjacency[v].append(u)
+    
+    
+    for removed_node in sorted(selected_nodes):
+        if perf_counter() >= deadline:
+            return
+        ##so retirar com 2 ligações
+        if len(adjacency[removed_node])!=2:
+            continue  
+
+        a,b=adjacency[removed_node] ##os 2 vizinhos que queremos ligar caso haja essa ligaçao se nao bora de next
+        bridge_key=edge_key(a,b)
+        if bridge_key not in instance.edges:
+            continue
+        bridge_edge=instance.edges[bridge_key]
+        ##pronto remover as arestas que desaparecem quando tiramos o nó
+        removed_key_a=edge_key(a,removed_node)
+        removed_key_b=edge_key(removed_node,b)
+        removed_edge_a=instance.edges[removed_key_a]
+        removed_edge_b=instance.edges[removed_key_b]
+        remaining_nodes=selected_nodes-{removed_node}
+
+        ##atualizar custos de retirar este nó
+        base_cost=current_cost-removed_edge_a.cost-removed_edge_b.cost+bridge_edge.cost
+        ## atualizar a folga (-do no retirado +consumos das edges removed - consumo da bridge)
+        base_slack=tuple(current_slack[l]-instance.node_resources[removed_node][l]+removed_edge_a.resources[l]+removed_edge_b.resources[l]-bridge_edge.resources[l] for l in range(instance.m))
+
+        ##procurar uma ligação entre nó exterior e a tree
+        for added_key, added_edge in instance.edges.items():
+            if perf_counter() >= deadline:
+                    return
+            
+            u,v=added_key
+            if u in remaining_nodes and v not in selected_nodes:
+                new_node=v
+            elif v in remaining_nodes and u not in selected_nodes:
+                new_node=u
+            else:
+                continue
+
+            ##atualizar custo e folga da nova edge
+            new_cost=base_cost + added_edge.cost
+            new_slack=tuple(base_slack[l]+instance.node_resources[new_node][l]-added_edge.resources[l] for l in range(instance.m))
+    
+            if any(value < 0 for value in new_slack):
+                continue
+
+            yield([removed_key_a, removed_key_b],[bridge_key,added_key],new_cost,new_slack)
+            
 
 ##o que é esta porra
 def main() -> None:
