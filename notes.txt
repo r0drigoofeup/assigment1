@@ -1,0 +1,306 @@
+ASSIGNMENT 1 - NOTES
+Updated: 4 November 2026
+
+
+1. WHERE TO START
+
+problem.py       Data classes, input reader, edge keys and solution validation.
+construction.py  Deterministic, multistart and randomized construction.
+pilot.py         Greedy rollout and Pilot Method.
+neighborhoods.py The three move generators.
+local_search.py  Generic single-neighborhood local search.
+vnd.py           Variable Neighborhood Descent.
+rckst.py         Re-exports the original public names and keeps the original CLI.
+experiments.py   Experiment runners, CSV output and the combined construction/VND.
+test_rckst.py    Small unit tests for validation of the problem constraints.
+results/        Raw experiment CSVs; keep these as the evidence for the report.
+instances/      Original input data (actual paths contain instances/instances/).
+slides/         Lecture slides. Assignment and problem PDFs remain in the root.
+
+
+
+2. PROBLEM, INPUT AND REPRESENTATION
+
+The graph is undirected. Select exactly k nodes and k-1 edges forming a tree.
+Minimize total edge cost. Each selected node supplies resources; each selected
+edge consumes resources. For every resource type separately:
+
+    slack[l] = sum(selected node supplies[l]) - sum(selected edge consumptions[l])
+    slack[l] >= 0
+
+Resources are pooled globally over the chosen tree. A surplus of one resource
+cannot compensate for a deficit of another resource.
+
+Edge stores u, v, cost and a tuple of resource consumptions.
+Instance stores name, n, k, m, node_resources and edges.
+Validation stores valid, errors, cost, available, consumed and slack.
+Here m is the number of RESOURCE TYPES, not the number of edges.
+
+edge_key(u, v): returns (min(u,v), max(u,v)), so both orientations identify
+the same edge. A solution is a list of these endpoint pairs; nodes are inferred
+from the edges. This representation does not properly handle the k=1 case.
+
+read_instance(path): loads the supplied text layout into an Instance. It assumes
+well-formed inputs; edge_count is read but not checked against the number of rows.
+It is not a general-purpose input-format validator.
+
+validate_solution(instance, selected_edges): checks edge count, duplicates,
+unknown edges, node count, connectivity, cycles and each resource constraint.
+It recomputes costs and resources from scratch. Call it before accepting a
+construction; reaching k nodes alone does not guarantee resource feasibility.
+
+3. CONSTRUCTION AND THE SCORE
+
+construct_heu(instance, start, lvalue=8, normalization='node', alpha=None, rng=None)
+starts with one node. Each candidate is an edge with exactly one endpoint already
+selected. Adding that edge and its new node preserves connectivity and avoids
+cycles. Continue until k nodes are selected. Return the edge list, or None if
+there is no way to extend the partial tree. A returned list can still be infeasible.
+
+For a candidate edge e adding node v:
+    new_slack[l] = current_slack[l] + supply[v,l] - consumption[e,l]
+    C = mean cost of all edges in the instance
+    R[l] = k * mean supply of resource l over all n nodes   ('node' mode)
+    score = cost[e] / C - lambda * min_l(new_slack[l] / R[l])
+
+Lower scores are preferred. A zero reference is replaced by 1 to avoid division
+by zero. The alternative 'edge' normalization uses the mean edge consumption
+of resource l as R[l]. It is still implemented, but experiments favored 'node'.
+
+Why normalize? Edge costs and resource quantities use different scales.
+Dividing by instance references makes their combination easier to tune. The
+factor k makes the supply reference an approximate total for k average nodes,
+rather than the supply of one average node. This is a heuristic scaling choice,
+not a constraint or an estimate guaranteed for the selected tree.
+
+Why the minimum? It focuses the score on the most constrained normalized
+resource. Why subtract it? A larger minimum slack makes the score lower.
+Lambda controls the tradeoff: zero prioritizes cheap edges; larger values give
+more weight to resources. It does not guarantee feasibility, and increasing it
+need not improve final cost or even monotonically improve feasibility.
+
+Negative slack is allowed DURING construction: a future node can bring more
+resources. Rejecting every infeasible partial tree was too restrictive in our
+early tests. The complete solution must still pass validate_solution. I had this first but i changed it
+
+
+With alpha=None, choose the smallest tuple:
+    (score, edge cost, new node ID, canonical edge key)
+Compare score and if its a tie use the other things 
+
+****Supply a random.Random object when calling construct_heu directly with alpha set.****
+With alpha set, build a restricted candidate list (RCL):
+    threshold = minimum_score + alpha * (maximum_score - minimum_score)
+Choose uniformly from candidates with score <= threshold, using rng.choice.
+Alpha=0 selects among minimum-score candidates (ties can still be randomized);
+alpha=1 allows all candidates. 
+
+construct_multistart: runs deterministic construction from every node, validates
+each result and returns the cheapest valid tree, or None. 
+
+construct_randomized: draws random starting nodes, runs randomized construction
+for a fixed number of iterations and returns the cheapest VALID construction.
+It prints counts of attempts, feasible constructions and distinct feasible
+trees. It does not return all trees and does not run local search.
+Valor de teste alpha=0.05
+
+4. PILOT METHOD
+
+pilot_rollout: copies a partial tree and greedily extends it using the construction
+score. gamma counts extra additions AFTER the received candidate has already
+been included. It stops at k nodes or after gamma additions. It can return an
+incomplete/infeasible tree, or None if extension is blocked.
+
+construct_pilot: for each possible next edge, simulate a rollout, compare the
+outcomes and apply only that candidate's first edge to the main tree.
+The evaluation currently used is:
+    added_cost / C + pilot_penalty * sum_l(max(0, -simulated_slack[l]) / R[l])
+--> added_cost includes the candidate and rollout edges, excluding the main prefix.
+--> pilot_penalty defaults to 8 and is distinct from construction lambda. 
+
+The comparison tuple first deprioritizes complete infeasible simulations, then
+uses the evaluation and deterministic tie-breakers. Incomplete simulations can
+have deficits. Complete valid simulations are saved as incumbent solutions. (this means that if we dont find a solution with pilot
+by adding one node at a time, the program also saves complete solution that the rollouts got and chooses the best one of those in case of
+invalid solution from the pilot method)
+The function returns the cheapest complete valid tree encountered, even if it came from an earlier rollout, or None if no such tree was found.
+
+pilot_multistart: tries all initial nodes and retains the best valid Pilot result.
+gamma=None means gamma=k (enough for full completion). Obviously, larger gamma costs more
+time and does not guarantee a better answer. Full multistart Pilot was very slow
+on large instances; most large manual tests used one start and gamma=1 or 3.
+The penalty number is 8 after some experiments but can be tuned
+
+
+5. NEIGHBORHOODS AND LOCAL SEARCH
+
+All three neighborhood functions receive:
+    instance, selected_edges, current_cost, current_slack, deadline
+deadline is an absolute perf_counter() timestamp. They yield feasible moves:
+    (list_of_removed_edges, list_of_added_edges, new_cost, new_slack)
+They can yield non-improving moves; the search decides which move to accept.
+Used yield because it returns one move and pauses the generator until the search asks for more.
+
+edge_exchange_neighbors: remove one edge, find one resulting component by DFS,
+then add a graph edge joining the two components. Nodes are unchanged.
+    new_cost = cost - removed_cost + added_cost
+    new_slack[l] = slack[l] + removed_consumption[l] - added_consumption[l]
+
+leaf_exchange_neighbors: remove a degree-one node and its edge; attach a node
+outside the original tree to any remaining node through an existing graph edge.
+Subtract the old node supply, add the new node supply, recover the removed edge's
+consumption and subtract the new edge's consumption. Removing a leaf preserves
+connectivity among the remaining nodes.
+
+internal_to_leaf_neighbors: remove a degree-two node and its two edges. Its old
+neighbors must have a direct graph edge; add that bridge. Attach an outside node
+as a leaf anywhere in the remaining tree. Remove/add one node and two edges.
+Check resources only after the WHOLE move, since the new node can compensate
+for an intermediate deficit. This neighborhood has stronger structural
+requirements, so it often contributes less frequently than the other two so not sure if it's any good
+
+local_search: validates the initial solution, explores ONE neighborhood and 
+repeatedly accepts strict cost improvements. 'first' accepts the first improving
+move; 'best' chooses the best improving move found in that neighborhood scan.
+Stop at a local optimum or time limit. Return (edge_list, information_dict).
+The dictionary contains initial/final cost, accepted moves ('iterations'),
+evaluated_valid_neighbors, stop_reason and time. The neighbor count excludes
+structurally rejected or resource-infeasible candidates.
+Strict improvements prevent cycles of accepted solutions. Best improvement can
+still end at a worse local optimum than first improvement due to different paths.
+
+6. VND
+
+vnd has the same solution/info return format plus per-neighborhood statistics:
+calls, moves, cost_reduction and evaluated_valid_neighbors.
+I followed the structure on the slides
+    search the current neighborhood for one improving move;
+    if accepted, apply it and reset the neighborhood index to zero;
+    otherwise, advance to the next neighborhood.
+Stop when all neighborhoods fail consecutively on the same solution, or on time.
+It accepts first or best improvement. One time allowance covers the whole VND.
+At a timeout, best improvement may apply the best move found in a partial scan.
+
+Important: the function's default order remains ARESTAS/EDGES FIRST. Our selected
+experimental configuration passes an explicit list:
+    [leaf_exchange_neighbors, edge_exchange_neighbors, internal_to_leaf_neighbors]
+and step_function='best'.
+
+
+
+7. EXPERIMENTS AND WHAT WE LEARNED
+
+experiments.py is a runner, not a new implementation of the individual algorithms.
+default_cases/configurations define the small initial comparisons; run_case runs
+eight VND configurations from a common starting tree. retry_failed examines
+construction failures with randomized attempts. improve_recovered runs VND on
+saved trees. compare_budgets also implements the combined procedure described
+below. main parses the command-line options.
+
+Working combined configuration selected on training data:
+    lambda values: 8, 16, 32
+    alpha: 0.05; normalization: node
+    50 attempts PER lambda = 150 constructions per instance/seed
+    apply VND to each distinct feasible constructed tree
+    VND: leaves first, best improvement, all three neighborhoods
+    seeds 1, 2, 3 evaluated separately
+
+Why several lambdas? Lambda=8 worked on many instances, while higher weights
+recovered resource-difficult cases. Values 12 and 24 sometimes gave better costs;
+8/16/32 is a compact working selection, not a proven optimal parameter set.
+Why several starting trees? The cheapest construction did not always lead to
+the cheapest post-search result. Duplicate trees are skipped within a run.
+
+The combined runner uses random.Random(f'{seed}:{lambda}') independently for each
+lambda and interleaves attempts across lambdas. It is not the same random stream
+as construct_randomized(seed=seed), so equal numeric seeds need not match trees.
+The two budgets share the first 50 attempts per lambda. The 100-attempt timing
+is cumulative, not an additional independent run. Do not sum both checkpoint
+times to estimate the actual experiment runtime.
+
+Small result summary (full evidence is in results/):
+
+- Initial 60-instance training comparison: deterministic lambda=8 construction
+  succeeded on 40 instances. On those, leaves-first/best with three neighborhoods
+  matched the best observed cost on 29/40 instances (ties included).
+  Source: vnd_20261104_132658_667806.csv.
+
+- The third neighborhood improved 6/160 matched two-versus-three-neighborhood
+  comparisons, across two instances. In one case, a direct improvement of only
+  one unit enabled other neighborhoods to reduce the total cost by 97 relative
+  to the two-neighborhood result. It is infrequent but can be complementary.
+
+- Successive exploratory recovery tests raised training coverage to 55/60 across
+  the seeds and settings tried. These are cumulative exploration results, not
+  the success rate of one fixed algorithm. The three recovery_20261104_*.csv
+  files record successes AND failures. recovered_vnd_20261104_134449_006046.csv
+  shows that VND improved 54/55 saved feasible constructions across 15 instances.
+
+- Budget comparison on 60 training instances, three seeds: both 50 and 100
+  attempts/lambda succeeded in 164/180 runs (55/60 instances in at least one seed).
+  Mean total times: 6.41 s and 12.68 s. Doubling attempts improved 56/164 feasible
+  pairs, with 0.65% mean cost reduction across all feasible pairs, and recovered
+  no extra failures. We chose 50 as the time/quality compromise.
+  Source: budgets_20261104_140040_411548.csv.
+
+- Fixed evaluation on 60 TEST instances (100 and 200 nodes), three seeds:
+  173/180 successful runs; 59/60 instances succeeded in at least one seed and
+  56/60 in all three. Seed success counts: 59, 57, 57. Mean total time: 5.29 s;
+  maximum: 28.77 s. No timeouts. The final cost averaged 11.27% below the best
+  constructed cost within each successful run; this is NOT an optimality gap.
+  n100_k30_m3_s20020 failed for all three seeds. Do not tune parameters to this
+  test failure and still describe the same set as untouched evaluation data.
+  Source: test_fixed_20261104_144126_552674.csv.
+
+These tests do not establish performance across every supplied graph size.
+Manual checks also covered 500 and 1000 nodes, but systematic evaluation here
+was limited to 100 and 200 nodes. Timing comparisons use single measurements
+per configuration/seed and can contain machine noise. No optimum certificates
+or lower bounds were used. Failure to construct a tree is not proof of infeasibility.
+
+8. HOW TO RUN / CONTINUE
+
+Run from the project directory:
+    python -m unittest -v test_rckst
+    python rckst.py "instances/instances/example_instance.txt"
+    python experiments.py --help
+
+Experiment modes (each writes a NEW CSV and preserves previous results):
+    python experiments.py                       Known 100/200/500/1000 examples
+    python experiments.py --small-train         Eight VND settings on training 100/200
+    python experiments.py --retry-failed <CSV>   Randomized construction on failures
+    python experiments.py --retry-failed <CSV> --lvalues 12 16
+    python experiments.py --improve-recovered <CSV1> <CSV2>
+    python experiments.py --compare-budgets     Paired 50/100 training experiment
+    python experiments.py --evaluate-test       Fixed 50-attempt test evaluation
+
+The last two modes use an overall 900-second cap per instance/seed and a per-VND
+cap (30 seconds on 100/200 nodes). CSV stop reasons distinguish time from attempt
+budgets. Saved checkpoints survive interruption; an unfinished checkpoint is
+not included. Seed runs are repetitions, not a single run whose best seed is
+silently reported. Results named 'ok' mean a feasible result, not a global optimum.
+
+Example of reusing the algorithms in another method:
+
+    from rckst import (read_instance, construct_multistart, vnd,
+        leaf_exchange_neighbors, edge_exchange_neighbors,
+        internal_to_leaf_neighbors, validate_solution)
+
+    instance = read_instance('instances/instances/train/100/n100_k30_m2_s10002.txt')
+    initial = construct_multistart(instance, lvalue=8, normalization='node')
+    if initial is not None:
+        solution, info = vnd(instance, initial,
+            neighborhoods=[leaf_exchange_neighbors, edge_exchange_neighbors,
+                           internal_to_leaf_neighbors],
+            step_function='best', time_limit=30)
+        print(validate_solution(instance, solution).cost, info)
+
+The work covers implementations for assignment items 1-6. The combined randomized
+construction + VND experiment already has a GRASP-like structure and should be
+coordinated with whoever owns the later assignment items. It must not replace
+the separate presentation/evaluation of construction, Pilot, local search and
+VND in the eventual report. The supplied PDFs remain the authority for the tasks.
+
+For the next part, reuse the move-generator interface, validation and VND rather
+than duplicating them. Keep the original result CSVs, record new parameters and
+seeds explicitly, and distinguish algorithm changes from file organization.

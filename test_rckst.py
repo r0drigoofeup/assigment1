@@ -5,6 +5,7 @@ import tempfile
 import unittest
 
 from rckst import read_instance, validate_solution
+from rckst import Edge, Instance, pilot_rollout, construct_pilot, pilot_multistart
 
 
 EXAMPLE = """6 8 4 1
@@ -64,6 +65,28 @@ class ProblemTests(unittest.TestCase):
         result = validate_solution(read_instance(self.path), [(1, 2)])
         self.assertEqual(result.slack, (9, -1))
         self.assertFalse(result.valid)
+
+    def test_pilot_without_edges(self):
+        instance = Instance("empty", 2, 2, 1, {1: (10,), 2: (10,)}, {})
+        self.assertIsNone(pilot_rollout(instance, start=1, initial_edges=[]))
+        self.assertIsNone(construct_pilot(instance, start=1))
+        self.assertIsNone(pilot_multistart(instance))
+
+    def test_pilot_blocked_rollout(self):
+        ## A componente do início tem só dois nós, mas precisamos de três
+        instance = Instance(
+            "disconnected", 3, 3, 1,
+            {1: (10,), 2: (10,), 3: (10,)},
+            {(1, 2): Edge(1, 2, 1, (1,))},
+        )
+        self.assertIsNone(pilot_rollout(instance, start=1, initial_edges=[(1, 2)]))
+        self.assertIsNone(construct_pilot(instance, start=1))
+        self.assertIsNone(pilot_multistart(instance))
+
+    def test_pilot_still_returns_valid_tree(self):
+        solution = pilot_multistart(self.instance)
+        self.assertIsNotNone(solution)
+        self.assertTrue(validate_solution(self.instance, solution).valid)
 
 if __name__ == "__main__":
     unittest.main()
